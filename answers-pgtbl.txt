@@ -1,0 +1,12 @@
+Other system calls that only return kernel-maintained, read-only process
+information could potentially be sped up using the shared USYSCALL page.
+
+For example, a system call that returns the current process's parent PID,
+process size, or other simple per-process metadata could store that value in
+the shared read-only page. User space could then read the value directly
+without executing an ecall and entering the kernel.
+
+This works only for information that the kernel can safely expose as
+read-only data and keep updated when the corresponding process state changes.
+System calls that perform actions, modify kernel state, access files, or need
+permission checks cannot generally be replaced this way.
