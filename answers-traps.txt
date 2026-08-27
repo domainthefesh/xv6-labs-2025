@@ -1,0 +1,6 @@
+1.Function arguments are passed in registers a0 through a7.In the call to printf,13 is store in a2.
+2.There is no explicit call to f or g in main's assembly code.The compiler inlined/optimized the functions,and f(8)+1 was computed as 12.
+3.printf is located in address 0x724.
+4.ra  contains 0x3c after the jal to printf,since 0x3c is the address of the instruction immediately following the call.
+5.HE110 World. Big-endian i: 0x726c6400. 57616 does not need to change.
+6.y prints an unpredictable/garbage value because the second %d has no corresponding argument. The behavior is undefined.
