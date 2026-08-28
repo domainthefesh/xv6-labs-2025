@@ -11,6 +11,13 @@
 #ifdef LAB_LOCK
 #define NLOCK 500
 
+#define RW_WRITER      (1ULL << 63)
+#define RW_WAIT_MASK   0x7fffffff00000000ULL
+#define RW_WAIT_ONE    (1ULL << 32)
+#define RW_READER_MASK 0xffffffffULL
+
+
+
 static struct spinlock *locks[NLOCK];
 struct spinlock lock_locks;
 
@@ -124,29 +131,101 @@ release(struct spinlock *lk)
 static void
 read_acquire_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
-  acquire(&rwlk->l);
+  for(;;){
+    /*
+     * 第一层检查：
+     * 条件明显不满足时，不去争 lk。
+     */
+    while(__atomic_load_n(&rwlk->writer, __ATOMIC_SEQ_CST) ||
+          __atomic_load_n(&rwlk->waiting_writers, __ATOMIC_SEQ_CST))
+      ;
+
+    /*
+     * 准备真正提交 reader acquisition。
+     */
+    acquire(&rwlk->lk);
+
+    /*
+     * 第二次检查！
+     *
+     * 从上面的 while 到 acquire(lk) 之间，
+     * writer 可能刚好出现。
+     */
+    if(__atomic_load_n(&rwlk->writer, __ATOMIC_SEQ_CST) ||
+       __atomic_load_n(&rwlk->waiting_writers, __ATOMIC_SEQ_CST)){
+      release(&rwlk->lk);
+      continue;
+    }
+
+    __atomic_fetch_add(&rwlk->readers, 1, __ATOMIC_SEQ_CST);
+
+    release(&rwlk->lk);
+    return;
+  }
 }
 
 static void
 read_release_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
-  release(&rwlk->l);
+  __atomic_fetch_sub(&rwlk->readers, 1, __ATOMIC_SEQ_CST);
 }
 
 static void
 write_acquire_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
-  acquire(&rwlk->l);
+  /*
+   * 先宣布：
+   * “有 writer 在等待。”
+   */
+  __atomic_fetch_add(&rwlk->waiting_writers,
+                     1,
+                     __ATOMIC_SEQ_CST);
+
+  for(;;){
+    /*
+     * 第一层检查。
+     *
+     * 当前有 reader 或 writer 时，
+     * 不去疯狂争 lk。
+     */
+    while(__atomic_load_n(&rwlk->readers, __ATOMIC_SEQ_CST) != 0 ||
+          __atomic_load_n(&rwlk->writer, __ATOMIC_SEQ_CST) != 0)
+      ;
+
+    acquire(&rwlk->lk);
+
+    /*
+     * 同样必须二次检查。
+     */
+    if(__atomic_load_n(&rwlk->readers, __ATOMIC_SEQ_CST) != 0 ||
+       __atomic_load_n(&rwlk->writer, __ATOMIC_SEQ_CST) != 0){
+      release(&rwlk->lk);
+      continue;
+    }
+
+    /*
+     * 此时由 lk 保证只有一个 writer
+     * 可以执行这两个状态转换。
+     */
+    __atomic_store_n(&rwlk->writer,
+                     1,
+                     __ATOMIC_SEQ_CST);
+
+    __atomic_fetch_sub(&rwlk->waiting_writers,
+                       1,
+                       __ATOMIC_SEQ_CST);
+
+    release(&rwlk->lk);
+    return;
+  }
 }
 
 static void
 write_release_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
-  release(&rwlk->l);
+  __atomic_store_n(&rwlk->writer,
+                   0,
+                   __ATOMIC_SEQ_CST);
 }
 
 void
@@ -180,9 +259,13 @@ write_release(struct rwspinlock *rwlk)
 void
 initrwlock(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
-  initlock(&rwlk->l, "rwlk");
+  initlock(&rwlk->lk, "rwlock");
+
+  __atomic_store_n(&rwlk->readers, 0, __ATOMIC_SEQ_CST);
+  __atomic_store_n(&rwlk->writer, 0, __ATOMIC_SEQ_CST);
+  __atomic_store_n(&rwlk->waiting_writers, 0, __ATOMIC_SEQ_CST);
 }
+
 
 // Test rwspinlock implementation.
 static void
