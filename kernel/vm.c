@@ -6,7 +6,10 @@
 #include "defs.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sleeplock.h"
 #include "fs.h"
+#include "file.h"
+#include "fcntl.h"
 
 /*
  * the kernel's page table.
@@ -482,5 +485,224 @@ ismapped(pagetable_t pagetable, uint64 va)
   if (*pte & PTE_V){
     return 1;
   }
+  return 0;
+}
+
+int
+mmapfault(struct proc *p, uint64 faultva, int write)
+{
+  struct vma *v = 0;
+
+  // 找 faultva 属于哪个 VMA。
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used &&
+       faultva >= p->vmas[i].addr &&
+       faultva < p->vmas[i].addr + p->vmas[i].len){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  if(v == 0)
+    return -1;
+
+  // 权限检查。
+  if(write){
+    if((v->prot & PROT_WRITE) == 0)
+      return -1;
+  } else {
+    if((v->prot & PROT_READ) == 0)
+      return -1;
+  }
+
+  uint64 va = PGROUNDDOWN(faultva);
+
+  char *mem = kalloc();
+  if(mem == 0)
+    return -1;
+
+  memset(mem, 0, PGSIZE);
+
+  /*
+   * va 在 mapping 中对应文件的 offset。
+   */
+  uint64 off = v->offset + (va - v->addr);
+
+  ilock(v->file->ip);
+
+  int n = readi(v->file->ip,
+                0,                 // dst 是 kernel address
+                (uint64)mem,
+                off,
+                PGSIZE);
+
+  iunlock(v->file->ip);
+
+  if(n < 0){
+    kfree(mem);
+    return -1;
+  }
+
+  int perm = PTE_U;
+
+  if(v->prot & PROT_READ)
+    perm |= PTE_R;
+
+  /*
+   * RISC-V 的 writable leaf 同时给 R 更稳妥。
+   */
+  if(v->prot & PROT_WRITE)
+    perm |= PTE_W | PTE_R;
+
+  if(mappages(p->pagetable,
+              va,
+              PGSIZE,
+              (uint64)mem,
+              perm) != 0){
+    kfree(mem);
+    return -1;
+  }
+
+  return 0;
+}
+
+static int
+mmapwriteback(struct vma *v, uint64 va, uint64 pa, uint64 n)
+{
+  uint64 done = 0;
+  uint64 off = v->offset + (va - v->addr);
+
+  /*
+   * mmap writeback must not extend the underlying file.
+   */
+  ilock(v->file->ip);
+
+  uint64 filesize = v->file->ip->size;
+
+  iunlock(v->file->ip);
+
+  if(off >= filesize)
+    return 0;
+
+  if(n > filesize - off)
+    n = filesize - off;
+
+  while(done < n){
+    uint64 chunk = BSIZE;
+
+    if(chunk > n - done)
+      chunk = n - done;
+
+    begin_op();
+
+    ilock(v->file->ip);
+
+    int r = writei(v->file->ip,
+                   0,
+                   pa + done,
+                   off + done,
+                   chunk);
+
+    iunlock(v->file->ip);
+
+    end_op();
+
+    if(r != chunk)
+      return -1;
+
+    done += chunk;
+  }
+
+  return 0;
+}
+
+
+int
+vmaunmap(struct proc *p, uint64 addr, uint64 len)
+{
+  if(len == 0)
+    return 0;
+
+  if(addr % PGSIZE)
+    return -1;
+
+  len = PGROUNDUP(len);
+
+  struct vma *v = 0;
+
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used &&
+       addr >= p->vmas[i].addr &&
+       addr + len <= p->vmas[i].addr + p->vmas[i].len){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  if(v == 0)
+    return -1;
+
+  uint64 oldstart = v->addr;
+  uint64 oldend = v->addr + v->len;
+
+  /*
+   * lab 保证 munmap 不会在中间 punch hole。
+   */
+  if(addr != oldstart && addr + len != oldend)
+    return -1;
+
+  for(uint64 va = addr; va < addr + len; va += PGSIZE){
+    pte_t *pte = walk(p->pagetable, va, 0);
+
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      continue;                 // lazy page 从来没加载过
+
+    uint64 pa = PTE2PA(*pte);
+
+    if(v->flags == MAP_SHARED){
+      /*
+       * 官方允许不检查 dirty bit，
+       * 所以所有实际存在的 MAP_SHARED page 都写回。
+       */
+      uint64 n = PGSIZE;
+
+      if(va + n > oldend)
+        n = oldend - va;
+
+      if(mmapwriteback(v, va, pa, n) < 0)
+        return -1;
+    }
+
+    uvmunmap(p->pagetable, va, 1, 1);
+  }
+
+  /*
+   * 整个 VMA 被删除。
+   */
+  if(addr == oldstart && addr + len == oldend){
+    fileclose(v->file);
+    memset(v, 0, sizeof(*v));
+    return 0;
+  }
+
+  /*
+   * 从 VMA 开头删掉一段：
+   *
+   * [XXXX | remaining]
+   *         ^
+   *         new addr
+   */
+  if(addr == oldstart){
+    v->addr += len;
+    v->offset += len;
+    v->len -= len;
+    return 0;
+  }
+
+  /*
+   * 从 VMA 尾部删掉一段。
+   */
+  v->len -= len;
+
   return 0;
 }

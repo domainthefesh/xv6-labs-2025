@@ -186,6 +186,10 @@ int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 int             ismapped(pagetable_t, uint64);
 uint64          vmfault(pagetable_t, uint64, int);
+
+int mmapfault(struct proc *, uint64, int);
+int vmaunmap(struct proc *, uint64, uint64);
+
 #if defined(LAB_PGTBL) || defined(SOL_MMAP)
 void            vmprint(pagetable_t);
 #endif

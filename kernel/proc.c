@@ -140,6 +140,8 @@ found:
     return 0;
   }
 
+   // 初始化 mmap 的 VMA 表
+  memset(p->vmas, 0, sizeof(p->vmas));
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -265,12 +267,21 @@ kfork(void)
     return -1;
   }
 
-  // Copy user memory from parent to child.
+  // Copy normal user memory.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
     freeproc(np);
     release(&np->lock);
     return -1;
   }
+
+  // Copy mmap VMA metadata.
+  for(i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      np->vmas[i] = p->vmas[i];
+      np->vmas[i].file = filedup(p->vmas[i].file);
+    }
+  }
+
   np->sz = p->sz;
 
   // copy saved user registers.
@@ -283,6 +294,7 @@ kfork(void)
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
+
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
@@ -334,6 +346,15 @@ kexit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      uint64 addr = p->vmas[i].addr;
+      uint64 len = p->vmas[i].len;
+
+      vmaunmap(p, addr, len);
     }
   }
 

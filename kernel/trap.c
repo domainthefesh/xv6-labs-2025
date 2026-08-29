@@ -68,10 +68,34 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else if((r_scause() == 15 || r_scause() == 13) &&
-            vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
-    // page fault on lazily-allocated page
-  } else {
+  } else if(r_scause() == 15 || r_scause() == 13) {
+  uint64 va = r_stval();
+  int handled = 0;
+
+  // 1. 先尝试原来的 lazy sbrk page fault.
+  if(vmfault(p->pagetable, va,
+             (r_scause() == 13) ? 1 : 0) != 0) {
+    handled = 1;
+  }
+
+  // 2. 如果不是 lazy-sbrk page，再看看是不是 mmap 区域.
+  if(!handled) {
+    int write = (r_scause() == 15);
+
+    if(mmapfault(p, va, write) == 0)
+      handled = 1;
+  }
+
+  // 两种都处理不了 => 真正非法 page fault.
+  if(!handled) {
+  printf("usertrap(): unexpected scause %p pid=%d\n",
+         (void *)r_scause(), p->pid);
+  printf("            sepc=%p stval=%p\n",
+         (void *)r_sepc(), (void *)r_stval());
+  setkilled(p);
+}
+
+} else {
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
     setkilled(p);

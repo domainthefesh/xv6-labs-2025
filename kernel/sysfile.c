@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -501,5 +502,111 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  uint64 len;
+  uint64 offset;
+  int prot;
+  int flags;
+  int fd;
+  struct file *f;
+
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+
+  if(argfd(4, &fd, &f) < 0)
+    return -1;
+
+  argaddr(5, &offset);
+
+  // 本 lab 只支持这些情况。
+  if(addr != 0 || len == 0 || offset != 0)
+    return -1;
+
+  if(flags != MAP_SHARED && flags != MAP_PRIVATE)
+    return -1;
+
+  // mmap 后 page fault 需要读取文件内容。
+  if(!f->readable)
+    return -1;
+
+  // MAP_SHARED + writable 必须有写文件权限。
+  if((flags == MAP_SHARED) &&
+     (prot & PROT_WRITE) &&
+     !f->writable)
+    return -1;
+
+  struct proc *p = myproc();
+
+  // 找空 VMA。
+  struct vma *v = 0;
+
+  for(int i = 0; i < NVMA; i++){
+    if(!p->vmas[i].used){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  if(v == 0)
+    return -1;
+
+  /*
+   * 找当前所有 mmap region 的最高地址，
+   * 新 mapping 放在它后面。
+   */
+  uint64 va = MMAPBASE;
+
+  if(PGROUNDUP(p->sz) > va)
+    va = PGROUNDUP(p->sz);
+
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      uint64 end = p->vmas[i].addr + p->vmas[i].len;
+
+      if(end > va)
+        va = PGROUNDUP(end);
+    }
+  }
+
+  uint64 maplen = PGROUNDUP(len);
+
+  if(va + maplen < va || va + maplen >= TRAPFRAME)
+    return -1;
+
+  v->used = 1;
+  v->addr = va;
+  v->len = maplen;
+  v->prot = prot;
+  v->flags = flags;
+  v->offset = offset;
+
+  /*
+   * mmap 后用户即使 close(fd)，VMA 仍然必须能用。
+   */
+  v->file = filedup(f);
+
+  return va;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  uint64 len;
+
+  argaddr(0, &addr);
+  argaddr(1, &len);
+
+  if(vmaunmap(myproc(), addr, len) < 0)
+    return -1;
+
   return 0;
 }

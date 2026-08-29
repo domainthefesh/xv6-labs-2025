@@ -81,9 +81,27 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+#define NVMA 16
+
+struct vma {
+  int used;
+
+  uint64 addr;
+  uint64 len;
+
+  int prot;
+  int flags;
+
+  struct file *file;
+  uint64 offset;
+};
+
+
 // Per-process state
 struct proc {
   struct spinlock lock;
+  struct vma vmas[NVMA];
+
 
   // p->lock must be held when using these:
   enum procstate state;        // Process state
